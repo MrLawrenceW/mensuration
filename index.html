@@ -612,7 +612,7 @@
         const GOOGLE_SCRIPT_URL =
             'https://script.google.com/macros/s/AKfycbzEPxHLxCtpDAZvzVyOKl9cXtc20l3HnBnW46KtHtmqTwOPiZ2_dtuHlrqMGQgfWJdziQ/exec';
 
-        const APP_VERSION = '2';
+        const APP_VERSION = '3';
         (function watchAppVersion() {
             // GitHub Pages serves this site as .../<repo>/ (index.html). Tolerate
             // every URL shape: no trailing slash, query strings, direct index.html link.
@@ -661,7 +661,8 @@
             0: { full: 10, perHeart: 2 },
             1: { full: 10, perHeart: 2 },
             2: { full: 10, perHeart: 2 },
-            3: { full: 10, perHeart: 2 }
+            // L3: 2 marks per sub-question — full is recomputed per game (2 × total sub-questions)
+            3: { full: 30, perHeart: 2 }
         };
         const LEVEL_FLOW = { 0: 'mc', 1: 'mc', 2: 'fill', 3: 'set' };
         let scoreTotals = { level0: 0, level1: 0, level2: 0, level3: 0 };
@@ -1270,7 +1271,7 @@
             setMens2: function() {
                 const r = [24, 48][this.rand(0, 1)], h = [45, 96][this.rand(0, 1)];
                 const Vcone = r * r * h / 3;
-                const Rv = this.rand(50, 60), Vmilk = 2 * Rv * Rv * Rv / 3;
+                const Rv = [51, 54, 57, 60][this.rand(0, 3)], Vmilk = 2 * Rv * Rv * Rv / 3;
                 const remaining = Vmilk - Vcone;
                 const remM3 = remaining / 1000000;
                 const agrees = remM3 > 0.3 ? 'yes' : 'no';
@@ -2076,7 +2077,7 @@
                 .replace(/[\s$%()*]/g, '')
                 .replace(/pi\b/g, 'π')
                 .replace(/\b(dollars?|marks?|seconds?|kg|hours?|minutes?|degrees?|thousand\s*dollars?)\b/g, '')
-                .replace(/\b(?:cm3|cm2|cm|m3|m2|m|mm3|mm2|mm)\b/g, '')
+                .replace(/(?:cm3|cm2|cm|mm3|mm2|mm|m3|m2|m)(?![a-z0-9])/g, '')
                 .replace(/\band\b/g, '');
         }
         // numeric value of a (π-aware) answer string, or null
@@ -2084,11 +2085,15 @@
             let t = String(s).toLowerCase().replace(/−/g, '-');
             t = t.replace(/²/g, '2').replace(/³/g, '3').replace(/°/g, '');
             t = t.replace(/[\s$%()*]/g, '').replace(/pi/g, 'π');
-            t = t.replace(/\b(?:cm3|cm2|cm|m3|m2|m|mm3|mm2|mm)\b/g, '');
+            t = t.replace(/(?:cm3|cm2|cm|mm3|mm2|mm|m3|m2|m)(?![a-z0-9])/g, '');
             t = t.replace(/\band\b/g, '');
             let m = t.match(/^(-?\d+(?:\.\d+)?)π$/);
             if (m) return parseFloat(m[1]) * Math.PI;
             if (t === 'π') return Math.PI;
+            m = t.match(/^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)π$/);
+            if (m) return (parseFloat(m[1]) / parseFloat(m[2])) * Math.PI;
+            m = t.match(/^(-?\d+(?:\.\d+)?)π\/(-?\d+(?:\.\d+)?)$/);
+            if (m) return (parseFloat(m[1]) / parseFloat(m[2])) * Math.PI;
             m = t.match(/^(-?\d+(?:\.\d+)?)$/);
             if (m) return parseFloat(m[1]);
             m = t.match(/^(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)$/);
@@ -2357,7 +2362,12 @@
             const cfg = MARKS[currentLevel];
             if (!cfg) return 0;
             const heartsLost = Math.max(0, LEVEL_LIVES[currentLevel] - lives);
-            return Math.max(0, cfg.full - heartsLost * cfg.perHeart);
+            let full = cfg.full;
+            if (currentLevel === 3 && currentSets && currentSets.length) {
+                // 2 marks for each sub-question
+                full = 2 * currentSets.reduce((n, s) => n + (s ? s.length : 0), 0);
+            }
+            return Math.max(0, full - heartsLost * cfg.perHeart);
         }
 
         function updateLiveScore() {
@@ -2431,7 +2441,9 @@
                 }
                 currentSets = MathGen.shuffle(currentSets);
                 currentSets.forEach((parts, i) => parts.forEach(p => { p.setNo = i + 1; }));
+                MARKS[3].full = 2 * currentSets.reduce((n, s) => n + s.length, 0);
                 updateLivesUI();
+                updateLiveScore();
                 renderSet();
                 return;
             }
@@ -2609,11 +2621,54 @@
             updateL3Preview(pi);
         }
 
+        // --- LIVE MATH PREVIEW (fractions / π / units render as proper math) ---
+        function mjTypeset(elements) {
+            if (!window.MathJax) return;
+            const go = () => {
+                try {
+                    const p = elements ? MathJax.typesetPromise(elements) : MathJax.typesetPromise();
+                    if (p && p.catch) p.catch(() => {});
+                } catch (e) { /* ignore */ }
+            };
+            if (typeof MathJax.typesetPromise === 'function') { go(); return; }
+            if (MathJax.startup && MathJax.startup.promise && typeof MathJax.startup.promise.then === 'function') {
+                MathJax.startup.promise.then(go).catch(() => {});
+            }
+        }
+
+        // Typed answer → TeX. Whitelisted characters only; anything else falls back to plain text.
+        function previewTex(raw) {
+            const s = String(raw).trim();
+            if (!s) return null;
+            if (!/^[0-9A-Za-z\s+\-*/().,:^π°²³−]+$/.test(s)) return null;
+            let tex = s
+                .replace(/−/g, '-')
+                .replace(/\*/g, '')
+                .replace(/²/g, '^2')
+                .replace(/³/g, '^3');
+            tex = tex.replace(/(\([^()]*\)|[0-9]+(?:\.[0-9]+)?)\s*\/\s*(\([^()]*\)|[0-9]+(?:\.[0-9]+)?)/g, '\\frac{$1}{$2}');
+            tex = tex.replace(/π/g, '\\pi ')
+                .replace(/°/g, '^\\circ')
+                .replace(/(cm|mm|m)(\^?[23])?\b/g, (m0, u, p) => '\\text{' + u + '}' + (p ? '^{' + p.replace('^', '') + '}' : ''));
+            return tex;
+        }
+        function updatePreviewBox(box, raw) {
+            if (!box) return;
+            const tex = previewTex(raw);
+            if (tex === null) {
+                box.textContent = String(raw).trim() ? String(raw) : 'Empty';
+                return;
+            }
+            const esc = tex.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            box.innerHTML = '$ ' + esc + ' $';
+            mjTypeset([box]);
+        }
+
         function updateL3Preview(pi) {
             const input = document.getElementById(`l3-input-${pi}`).value;
             const previewBox = document.getElementById(`l3-preview-${pi}`);
             if (!previewBox) return;
-            previewBox.textContent = input.trim() ? input : 'Empty';
+            updatePreviewBox(previewBox, input);
         }
 
         function submitSetPartMC(pi, btnIdx) {
@@ -2930,11 +2985,11 @@
             }
         }
 
-        // Live Answer Preview for Fill-in Mode (plain text — never MathJax)
+        // Live Answer Preview for Fill-in Mode — typed answers render as proper math
         function updateLivePreview() {
             const input = document.getElementById('conventional-input').value;
             const previewBox = document.getElementById('math-preview');
-            previewBox.textContent = input.trim() ? input : 'Empty';
+            updatePreviewBox(previewBox, input);
         }
 
         // --- HELPER UI FUNCTIONS ---
